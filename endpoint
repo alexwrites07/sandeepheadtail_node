@@ -1,0 +1,268 @@
+const admin = require('firebase-admin');
+const cron = require('node-cron');
+
+const serviceAccount = require('./sandeepkote-c67f5-firebase-adminsdk-qhggd-e95af41597.json');
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+  databaseURL: "https://sandeepkote-c67f5-default-rtdb.firebaseio.com"
+});
+
+const db = admin.database();
+const ref = db.ref('timer/time');
+const standingRef = db.ref('standing');
+const earningRef = db.ref('earning');
+let standingAmount = 0;
+let result = ''; // Define the result variable
+
+function storeResultAndDeleteBetCollection() {
+  const last10dataRef = db.ref('last10data');
+  last10dataRef.once('value', (snapshot) => {
+    let last10data = snapshot.val() || [];
+
+    last10data.unshift(result);
+
+    if (last10data.length > 10) {
+      last10data.pop();
+    }
+
+    const totalRef = db.ref('result');
+    totalRef.set(result, (error) => {
+      if (error) {
+        console.error('Error storing total value:', error);
+      } else {
+        deleteBetCollection();
+      }
+    });
+
+    setTimeout(() => {
+      last10dataRef.set(last10data, (error) => {
+        if (error) {
+          console.error('Error updating last10data:', error);
+        } else {
+          updateEndpointsForUser(currentPlayerUid, earningAmount);
+        }
+      });
+    }, 10000);
+  });
+}
+
+function updatePlayerPoint(playerUid, amount) {
+  const playerRef = db.ref('Player');
+  playerRef.child(playerUid).update({
+    playerpoint: amount,
+  });
+}
+
+function updatePlayerWin(playerUid, winAmount) {
+  const playerRef = db.ref('Player');
+  playerRef.child(playerUid).update({
+    win: winAmount,
+  });
+}
+
+function updatePlayerData(result, totalChapa, totalKata) {
+  const playerRef = db.ref('Player');
+  playerRef.once('value', (snapshot) => {
+    const playerData = snapshot.val();
+
+    if (playerData) {
+      Object.keys(playerData).forEach((playerUid) => {
+        const player = playerData[playerUid];
+
+        if (player && player.hasOwnProperty('playerpoint')) {
+          const playerpoint = player.playerpoint || 0;
+          const endpoint = player.endpoint || 0;
+          const win = player.win || 0;
+
+          let updatedWin = win;
+          let updatedEndpoint = endpoint;
+
+          if (result === 'chapa') {
+            updatedWin = totalChapa * 2;
+          } else if (result === 'kata') {
+            updatedWin = totalKata * 2;
+          }
+
+          updatedEndpoint = -updatedWin + playerpoint;
+
+          playerRef.child(playerUid).update({
+            win: updatedWin,
+            endpoint: updatedEndpoint,
+          });
+        }
+      });
+      
+    }
+  });
+}
+
+function updateEndpointsForUser(userId, earningAmount) {
+  const playerRef = db.ref('Player');
+  playerRef.child(userId).once('value', (snapshot) => {
+    const userData = snapshot.val();
+
+    if (userData && userData.hasOwnProperty('agentID') && userData.hasOwnProperty('distributorID')) {
+      const agentID = userData.agentID;
+      const distributorID = userData.distributorID;
+
+      updateEndpointForUser(agentID, earningAmount);
+      updateEndpointForUser(distributorID, earningAmount);
+    }
+  });
+}
+
+function updateEndpointForUser(userId, earningAmount) {
+  const playerRef = db.ref('Player');
+  playerRef.child(userId).once('value', (snapshot) => {
+    const userData = snapshot.val();
+
+    if (userData && userData.hasOwnProperty('endpoint')) {
+      const currentEndpoint = userData.endpoint;
+      const newEndpoint = currentEndpoint - earningAmount;
+
+      playerRef.child(userId).update({
+        endpoint: newEndpoint,
+      });
+    }
+  });
+}
+
+function setStanding(amount) {
+  standingRef.set(amount, (error) => {
+    if (error) {
+      console.error('Error storing standing amount:', error);
+    } else {
+      storeResultAndDeleteBetCollection();
+    }
+  });
+}
+
+function deleteBetCollection() {
+  const betRef = db.ref('bet');
+  betRef.remove((error) => {
+    if (error) {
+      console.error('Error deleting bet collection:', error);
+    }
+  });
+}
+
+cron.schedule('*/1 * * * *', () => { 
+  const currentTime = Date.now();
+  ref.set(currentTime, (error) => {
+    if (error) {
+      console.error('Error updating field:', error);
+    } else {
+      console.log('Field updated successfully!');
+    }
+  });
+
+  const betRef = db.ref('bet');
+  const totalRef = db.ref('result');
+  const last10dataRef = db.ref('last10data');
+  const earningPercentageRef = db.ref('earningPercentage');
+  let earningPercentage = 0;
+  betRef.once('value', (snapshot) => {
+    let totalChapa = 0;
+    let totalKata = 0;
+    snapshot.forEach((childSnapshot) => {
+      const betUid = childSnapshot.key;
+      const childData = childSnapshot.val();
+      totalChapa += parseInt(childData.chapa);
+      totalKata += parseInt(childData.kata);
+
+      const playerUid = childData.betUid;
+      const playerPoint = parseInt(childData.chapa) + parseInt(childData.kata);
+      updatePlayerPoint(playerUid, playerPoint);
+
+      if (playerUid === currentPlayerUid) {
+        const playerWin = playerPoint * 2;
+        updatePlayerWin(playerUid, playerWin);
+      }
+    });
+
+    standingRef.once('value', (snapshot) => {
+      standingAmount = parseInt(snapshot.val());
+      earningPercentageRef.once('value', (snapshot) => {
+        earningPercentage = parseFloat(snapshot.val()) / 100.0;
+        let minOfThem = Math.min(totalChapa, totalKata);
+        let totalOfBoth = totalChapa + totalKata;
+        let maxOfBoth = Math.max(totalChapa, totalKata);
+        let earning = 0;
+        if (totalChapa == totalKata) {
+          const randomCharacter = Math.random() < 0.5 ? "c" : "k";
+          if (randomCharacter == "c") {
+            earning = totalChapa * earningPercentage;
+            result = "commissionc";
+          } else if (randomCharacter == "k") {
+            earning = totalKata * earningPercentage;
+            result = "commissionk";
+          }
+        } else {
+          if (standingAmount === 0 || standingAmount <= maxOfBoth) {
+            standingAmount = standingAmount + totalOfBoth - minOfThem * 2 - earning;
+            setStanding(standingAmount);
+            result = totalChapa > totalKata ? "kata" : "chapa";
+          } else if (standingAmount >= maxOfBoth * 3) {
+            standingAmount = standingAmount + totalOfBoth - (maxOfBoth * 4) - earning;
+            setStanding(standingAmount);
+            result = totalChapa > totalKata ? "chapaj" : "kataj";
+          } else if (standingAmount >= maxOfBoth) {
+            standingAmount = standingAmount + totalOfBoth - (maxOfBoth * 2) - earning;
+            setStanding(standingAmount);
+            result = totalChapa > totalKata ? "chapa" : "kata";
+          }
+        }
+
+        const earningAmount = earning;
+
+        earningRef.once('value', (snapshot) => {
+          let currentEarningAmount = snapshot.val() || 0;
+          const newEarningAmount = currentEarningAmount + earningAmount;
+
+          if (!isNaN(newEarningAmount)) {
+            earningRef.set(newEarningAmount, (error) => {
+              if (error) {
+                console.error('Error storing earning amount:', error);
+              } else {
+                console.log('Earning amount stored successfully!');
+                setStanding(standingAmount);
+              }
+            });
+          }
+        });
+
+        updatePlayerData(result, totalChapa, totalKata);
+      });
+    });
+
+    last10dataRef.once('value', (snapshot) => {
+      let last10data = snapshot.val() || [];
+      last10data.unshift(result);
+
+      if (last10data.length > 10) {
+        last10data.pop();
+      }
+
+      totalRef.set(result, (error) => {
+        if (error) {
+          console.error('Error storing total value:', error);
+        } else {
+          deleteBetCollection();
+        }
+      });
+
+      setTimeout(() => {
+        last10dataRef.set(last10data, (error) => {
+          if (error) {
+            console.error('Error updating last10data:', error);
+          } else {
+            updateEndpointsForUser(betUid, earningAmount);
+          }
+        });
+      }, 10000);
+    });
+  })
+  .catch((error) => {
+    console.error('Error retrieving data:', error);
+  });
+});
